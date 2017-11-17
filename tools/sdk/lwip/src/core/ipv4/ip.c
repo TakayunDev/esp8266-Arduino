@@ -202,7 +202,7 @@ ip_router(ip_addr_t *dest, ip_addr_t *source){
 
 #if IP_FORWARD
 #if IP_NAPT
-#define IP_NAPT_MAX 512
+#define IP_NAPT_MAX 32
 #define IP_PORTMAP_MAX 32
 #define IP_NAPT_TIMEOUT_MS_TCP (10*60*1000)
 #define IP_NAPT_TIMEOUT_MS_TCP_DISCON (3*1000)
@@ -210,6 +210,7 @@ ip_router(ip_addr_t *dest, ip_addr_t *source){
 #define IP_NAPT_TIMEOUT_MS_ICMP (2*1000)
 #define IP_NAPT_PORT_RANGE_START 49152
 #define IP_NAPT_PORT_RANGE_END   61439
+#define IP_NAPT_BITFIELD 0
 
 int nr_active_napt_tcp = 0, nr_active_napt_udp = 0, nr_active_napt_icmp = 0;
 
@@ -240,12 +241,22 @@ static struct napt_table {
   u16_t dport;
   u16_t mport;
   u8_t proto;
+#if IP_NAPT_BITFIELD
   u8_t fin1 : 1;
   u8_t fin2 : 1;
   u8_t finack1 : 1;
   u8_t finack2 : 1;
   u8_t synack : 1;
   u8_t rst : 1;
+#else
+  u8_t flags;
+#define IP_NAPT_F_FIN1        ((u8_t)0x01U)
+#define IP_NAPT_F_FIN2        ((u8_t)0x02U)
+#define IP_NAPT_F_FINACK1     ((u8_t)0x04U)
+#define IP_NAPT_F_FINACK2     ((u8_t)0x08U)
+#define IP_NAPT_F_SYNACK      ((u8_t)0x16U)
+#define IP_NAPT_F_RST         ((u8_t)0x32U)
+#endif
 #if IP_NAPT_MAX<255
   u8_t next, prev;
 #else
@@ -416,7 +427,13 @@ ip_napt_find(u8_t proto, u32_t addr, u16_t port, u16_t mport, u8_t dest)
     next = t->next;
 #if LWIP_TCP
     if (t->proto == IP_PROTO_TCP &&
+#if IP_NAPT_BITFIELD
         (((t->finack1 && t->finack2 || !t->synack) &&
+#else
+        ((( (t->flags & IP_NAPT_F_FINACK1)
+         && (t->flags & IP_NAPT_F_FINACK2)
+         || !(t->flags & IP_NAPT_F_SYNACK) ) &&
+#endif
           now - t->last > IP_NAPT_TIMEOUT_MS_TCP_DISCON) ||
          now - t->last > IP_NAPT_TIMEOUT_MS_TCP)) {
       ip_napt_free(t);
@@ -481,7 +498,11 @@ ip_napt_add(u8_t proto, u32_t src, u16_t sport, u32_t dest, u16_t dport)
     t->dport = dport;
     t->mport = mport;
     t->proto = proto;
+#if IP_NAPT_BITFIELD
     t->fin1 = t->fin2 = t->finack1 = t->finack2 = t->synack = t->rst = 0;
+#else
+    t->flags = 0;
+#endif
     ip_napt_insert(t);
     return mport;
   }
@@ -686,6 +707,7 @@ ip_napt_recv(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
       ip_napt_modify_addr_tcp(tcphdr, &iphdr->dest, t->src);
       ip_napt_modify_addr(iphdr, &iphdr->dest, t->src);
 
+#if IP_NAPT_BITFIELD
       if ((TCPH_FLAGS(tcphdr) & (TCP_SYN|TCP_ACK)) == (TCP_SYN|TCP_ACK))
         t->synack = 1;
       if ((TCPH_FLAGS(tcphdr) & TCP_FIN))
@@ -694,6 +716,16 @@ ip_napt_recv(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
         t->finack2 = 1; /* FIXME: Currently ignoring ACK seq... */
       if (TCPH_FLAGS(tcphdr) & TCP_RST)
         t->rst = 1;
+#else
+      if ((TCPH_FLAGS(tcphdr) & (TCP_SYN|TCP_ACK)) == (TCP_SYN|TCP_ACK))
+        t->flags |= IP_NAPT_F_SYNACK;
+      if ((TCPH_FLAGS(tcphdr) & TCP_FIN))
+        t->flags |= IP_NAPT_F_FIN1;
+      if ((t->flags & IP_NAPT_F_FIN2) && (TCPH_FLAGS(tcphdr) & TCP_ACK))
+        t->flags |= IP_NAPT_F_FINACK2; /* FIXME: Currently ignoring ACK seq... */
+      if (TCPH_FLAGS(tcphdr) & TCP_RST)
+        t->flags |= IP_NAPT_F_RST;
+#endif
       return;
   }
 #endif // LWIP_TCP
@@ -783,12 +815,21 @@ ip_napt_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp, struct 
       }
       ip_napt_update(t);
       mport = t->mport;
+#if IP_NAPT_BITFIELD
       if ((TCPH_FLAGS(tcphdr) & TCP_FIN))
         t->fin2 = 1;
       if (t->fin1 && (TCPH_FLAGS(tcphdr) & TCP_ACK))
         t->finack1 = 1; /* FIXME: Currently ignoring ACK seq... */
       if (TCPH_FLAGS(tcphdr) & TCP_RST)
         t->rst = 1;
+#else
+      if ((TCPH_FLAGS(tcphdr) & TCP_FIN))
+        t->flags |= IP_NAPT_F_FIN2;
+      if ((t->flags & IP_NAPT_F_FIN1) && (TCPH_FLAGS(tcphdr) & TCP_ACK))
+        t->flags |= IP_NAPT_F_FINACK1; /* FIXME: Currently ignoring ACK seq... */
+      if (TCPH_FLAGS(tcphdr) & TCP_RST)
+        t->flags |= IP_NAPT_F_RST;
+#endif
     }
 
     if (mport != tcphdr->src)
