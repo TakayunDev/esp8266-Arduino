@@ -254,8 +254,8 @@ static struct napt_table {
 #define IP_NAPT_F_FIN2        ((u8_t)0x02U)
 #define IP_NAPT_F_FINACK1     ((u8_t)0x04U)
 #define IP_NAPT_F_FINACK2     ((u8_t)0x08U)
-#define IP_NAPT_F_SYNACK      ((u8_t)0x16U)
-#define IP_NAPT_F_RST         ((u8_t)0x32U)
+#define IP_NAPT_F_SYNACK      ((u8_t)0x10U)
+#define IP_NAPT_F_RST         ((u8_t)0x20U)
 #endif
 #if IP_NAPT_MAX<255
   u8_t next, prev;
